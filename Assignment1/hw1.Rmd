@@ -1,0 +1,283 @@
+---
+title: "Assignment 1"
+author: "Alima Dzhanybaeva"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(lmtest)
+library(sandwich)
+library(haven)
+library(stargazer)
+library(caret)
+library(grid)
+library(modelsummary)
+library(scales)
+# Downloading the original dataset
+data1 <- read_csv("https://osf.io/4ay9x/download")
+
+# Filtering for the chosen occupations
+data <- data1 %>% filter(occ2012>1000 & occ2012<1300)
+
+df <- data %>%
+  # Creating variable for hourly wage
+  mutate(hourly_wage = earnwke/uhours) %>%
+  # Creating dummy variables for education levels
+  mutate(
+    base = as.numeric(grade92<=42),
+    BA = as.numeric(grade92==43),
+    MA = as.numeric(grade92==44),
+    Prof = as.numeric(grade92==45),
+    PhD = as.numeric(grade92==46)) %>%
+  # Creating dummy variable for gender
+  mutate(female=as.numeric(sex==2)) %>%
+  # Creating dummy variable for having a children
+  mutate(child = as.numeric(ownchild >= 1)) %>%
+  # Creating variable for age squared
+  mutate(age_sq=age^2) %>%
+  # Creating dummy variable for marital status
+  mutate(married = case_when(
+    marital <= 3 ~ 1,
+    marital >3 ~ 0)) %>%
+  # Creating variable for education levels for the visualization 
+  mutate(ed = case_when(
+    grade92 <= 42 ~ 'Without degree',
+    grade92 == 43 ~ 'BA',
+    grade92 == 44 ~ 'MA',
+    grade92 == 45 ~ 'Prof',
+    grade92 == 46 ~ 'Phd')) %>%
+  # Creating variable for gender for the visualization
+  mutate(gend = case_when(
+    sex == 1 ~ 'Male',
+    sex == 2 ~ 'Female'
+  ))
+
+# Creating function for 99 percentile
+P99 <- function(x){ quantile(x,.99,na.rm=T)}
+
+# Creating summary table
+table1 <-datasummary(
+    (`Weekly earnings` = earnwke) +
+    (`Weekly hours worked` = uhours) + 
+    (`Earning per hour` = hourly_wage) + 
+    (`Female` = female) +
+    (`BA Degree` = BA) + 
+    (`MA Degree` = MA) + 
+    (`Professional Degree` = Prof) + 
+    (`PhD` = PhD) + 
+    (`Age` = age) + 
+    (`Has child` = child) ~ (Median + SD + Min + Max + P99 + N),
+  data = df) %>%
+   kableExtra::kable_styling(latex_options = "HOLD_position")
+
+# Filtering for hourly wage
+df <- df %>% filter(hourly_wage<73)
+```
+### In this assignment, four predictive models for earnings per hour will be constructed using the CPS-earnings dataset. For this work, all 'Computer and Mathematical' occupations were chosen for the analysis.
+### In order to obtain the variable for earnings per hour the original *earnwke* (weekly earnings) variable was divided by *uhours* (number of hours).  Further,  the dataset was filtered for an hourly wage less than 73, as the 99 percentile for this variable is 72.12 while the maximum value is 120 (Appendix: Table 3). 
+### For the explanatory variables, *education* was proven to be a strong driver of people's wages in many studies, as better-educated individuals are considered and indeed are more productive. This correlation was also found in the dataset (Graph 1). Therefore, the dummy variables for different levels of education level were created and chosen for the simplest *Model 1*. 
+### Another variable that affects people's wages is age, as younger workers have less experience. However, as it is shown in Graph 2 after one point the earnings per hour start to decline with age. Consequently, *age* and newly generated *age squared* were also added to *Model 2*.  
+### For *Model 3* three dummy variables were generated: *female*, *married*, and *child*.  *Female* is believed to be a good explanatory variable for earnings, as the gender pay gap is still present nowadays and women are often under-represented in decision-making roles.  The proof of it is shown in Graph 3.  As for *married* and *child*, people in wedlock and with children tend to work longer hours and put in increased effort at work as they're well aware that their current wage affects not only them. These correlations are indeed present for the chosen occupations (Graph 4-5).
+### *Model 4* includes all previously mentioned variables with the addition of four interaction terms: *education\*female*, *education\*married*, *female\*child*, and *female\*married*. 
+### RMSE in the full sample, cross-validated RMSE and BIC in the full sample are presented in the tables below.
+```{r include=FALSE}
+# Multiple linear regressions
+model1 <- as.formula(hourly_wage ~ BA + MA + Prof + PhD)
+model2 <- as.formula(hourly_wage ~ BA + MA + Prof + PhD + age + age_sq)
+model3 <- as.formula(hourly_wage ~ BA + MA + Prof + PhD + age + age_sq + female + married + child)
+model4 <- as.formula(hourly_wage ~ BA + MA + Prof + PhD + age + age_sq + female + married + child +
+                       BA*female + MA*female + Prof*female + PhD*female +
+                       BA*married + MA*married + Prof*married + PhD*married +
+                       child*female + married*female)
+reg1 <- lm(model1, data=df)
+reg2 <- lm(model2, data=df)
+reg3 <- lm(model3, data=df)
+reg4 <- lm(model4, data=df)
+
+# Evaluation of the models  
+models <- c("reg1", "reg2", "reg3", "reg4")
+AIC <- c()
+BIC <- c()
+RMSE <- c()
+RSquared <- c()
+regr <- c()
+k <- c()
+
+for ( i in 1:length(models)){
+  AIC[i] <- AIC(get(models[i]))
+  BIC[i] <- BIC(get(models[i]))
+  RMSE[i] <- RMSE(predict(get(models[i])), get(models[i])$model$hourly_wage)
+  RSquared[i] <-summary(get(models[i]))$r.squared
+  regr[[i]] <- coeftest(get(models[i]), vcov = sandwich)
+  k[i] <- get(models[i])$rank -1
+}
+eval <- data.frame(models, k, RSquared, RMSE, BIC)
+eval <- eval %>%
+  mutate(models = paste0("(",gsub("reg","",models),")")) %>%
+  rename(Model = models, "R-squared" = RSquared, "Training RMSE" = RMSE, "N predictors" = k)
+
+# Cross-validation
+
+# Setting number of folds
+k <- 4
+
+set.seed(13505) 
+cv1 <- train(model1, df, method = "lm", trControl = trainControl(method = "cv", number = k))
+set.seed(13505)
+cv2 <- train(model2, df, method = "lm", trControl = trainControl(method = "cv", number = k))
+set.seed(13505)
+cv3 <- train(model3, df, method = "lm", trControl = trainControl(method = "cv", number = k), na.action = "na.omit")
+set.seed(13505)
+cv4 <- train(model4, df, method = "lm", trControl = trainControl(method = "cv", number = k))
+
+# Calculating average RMSE
+cv <- c("cv1", "cv2", "cv3", "cv4")  
+rmse_cv <- c()
+
+for(i in 1:length(cv)){
+  rmse_cv[i] <- sqrt((get(cv[i])$resample[[1]][1]^2 +
+                        get(cv[i])$resample[[1]][2]^2 +
+                        get(cv[i])$resample[[1]][3]^2 +
+                        get(cv[i])$resample[[1]][4]^2)/4)
+}
+
+# Summarizing results of cross-validation
+cv_mat <- data.frame(rbind(cv1$resample[4], "Average"),
+                     rbind(cv1$resample[1], rmse_cv[1]),
+                     rbind(cv2$resample[1], rmse_cv[2]),
+                     rbind(cv3$resample[1], rmse_cv[3]),
+                     rbind(cv3$resample[1], rmse_cv[4])
+)
+
+colnames(cv_mat)<-c("Resample","Model1", "Model2", "Model3", "Model4")
+```
+```{r echo=FALSE}
+# Displaying results of model evaluation and cross-validation
+knitr::kable(eval, caption = "Linear regression evaluation")%>%
+  kableExtra::kable_styling(position = "center") %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+knitr::kable(cv_mat, caption = "Cross-validation")%>%
+  kableExtra::kable_styling(position = "center", latex_options = "HOLD_position")%>%
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+```
+
+### As we can see from the Table 1, due to a better fit RMSE decreases as more variables are added to the model. Nevertheless, my choice falls on the *Model 3*, as the difference in RMSE in the full sample between the two most complex models is negligible, and both RMSE in cross-validation and BIC in the full sample are the lowest for *Model 3* indicating that *Model 4* is overfitted.
+
+## Appendix
+### Table 1: Descriptive statistics
+```{r echo=FALSE}
+table1
+```
+
+### Table 4: Results of linear regressions
+```{r echo=FALSE}
+msummary(list( "Model 1" = reg1, "Model 2" = reg2, "Model 3" = reg3, "Model 4" = reg4),
+         fmt="%.3f",
+         gof_omit = 'DF|Deviance|Log.Lik.|F|R2 Adj.|AIC|R2|PseudoR2',
+         stars=c('*' = .05, '**' = .01)
+) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+```
+
+### Graph 1: Earnings per hour by education levels
+```{r echo=FALSE, fig.width = 6, fig.height = 4, fig.align = "center"}
+ggplot(df,aes(reorder(factor(ed), hourly_wage), hourly_wage, fill=factor(ed))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(x = "Education", y = "Earning per hour") + 
+  ggtitle("Earnings per hour by education levels")
+```
+
+### Graph 2: Earnings per hour by age
+```{r echo=FALSE, message=FALSE, fig.width = 6, fig.height = 4, fig.align = "center"}
+ggplot(df, aes(age, hourly_wage)) +
+  stat_summary_bin(fun = 'mean', bins = 50, 
+                   geom = 'point', color = 'darkblue',
+                   size = 2.5, alpha = 0.8) +
+  geom_smooth(method = "loess", se = FALSE, alpha = 0.4,
+              linewidth = 0.8, color = "#990000") +
+  theme_bw() +
+  labs(x = "Age", y = "Earnings per hour") + 
+  ggtitle("Earnings per hour by age")
+```
+
+### Graph 3: Earnings per hour by gender
+```{r echo=FALSE, message=FALSE, fig.width = 5, fig.height = 4, fig.align = "center"}
+ggplot(df,aes(factor(gend), hourly_wage, fill=factor(gend))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(x = "Gender", y = "Earnings per hour") +
+  ggtitle("Earnings per hour by gender")
+```
+
+### Graph 4: Earnings per hour by marital status
+```{r echo=FALSE, message=FALSE, fig.width = 5, fig.height = 4, fig.align = "center"}
+ggplot(df,aes(factor(married), hourly_wage, fill=factor(married))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  theme(legend.position = "none", axis.title.x=element_blank()) +
+  scale_x_discrete(labels = c('Non-married', 'Married')) + 
+  labs(y = "Earning per hour") + 
+  ggtitle("Earnings per hour by marital status")
+```
+
+### Graph 5: Earnings per hour by having at least 1 child
+```{r echo=FALSE, message=FALSE, fig.width = 5, fig.height = 4, fig.align = "center"}
+ggplot(df,aes(factor(child), hourly_wage, fill=factor(child))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  theme(legend.position = "none") +
+  theme(axis.title.x=element_blank()) +
+  labs(y = "Earning per hour") + 
+  scale_x_discrete(labels = c('Without child', 'With child')) +
+  ggtitle("Earnings per hour by having at least 1 child")
+```
+
+### Graph 6: Boxplots by two variables
+```{r include=FALSE}
+# Boxplot for Hourly wage by education level and gender
+gr6<- ggplot(df, aes(x = reorder(factor(ed), hourly_wage), y = hourly_wage, fill = factor(gend))) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), legend.position = "top", legend.title = element_blank(), plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Earnings per hour") +
+  ggtitle("Earnings per hour by \n education level and gender")
+  
+
+# Boxplot for Earnings per hour by education level and marital status
+gr7 <- ggplot(df, aes(x = reorder(factor(ed), hourly_wage), y = hourly_wage, fill = factor(married))) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), legend.position = "top", legend.title = element_blank(), plot.title = element_text(hjust = 0.5)) +
+  scale_fill_discrete(labels=c("Non-married", "Married")) +
+  labs(y = "Earnings per hour") +
+  ggtitle("Earnings per hour by \n education level and marital status")
+
+
+# Boxplot for Earnings per hour by child and gender
+gr8 <- ggplot(df, aes(x = factor(child), y = hourly_wage, fill = factor(gend))) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), legend.position = "top", legend.title = element_blank(), plot.title = element_text(hjust = 0.5)) +
+  scale_x_discrete(labels = c('Without child', 'With child')) +
+  labs(y = "Earnings per hour") +
+  ggtitle("Earnings per hour by \n child and gender")
+
+
+# Boxplot for Earnings per hour by marital status and gender
+gr9 <- ggplot(df, aes(x = factor(married), y = hourly_wage, fill = factor(gend))) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), legend.position = "top", legend.title = element_blank(), plot.title = element_text(hjust = 0.5)) +
+  scale_x_discrete(labels = c('Non-married', 'Married')) +
+  labs(y = "Earnings per hour") +
+  ggtitle("Earnings per hour by \n marital status and gender")
+```
+```{r echo=FALSE, message=FALSE, fig.height=8, fig.width=9}
+gridExtra::grid.arrange(grobs = list(gr6, gr7, gr8, gr9), ncol = 2)
+```
