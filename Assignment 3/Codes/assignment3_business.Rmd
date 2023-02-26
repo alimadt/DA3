@@ -1,0 +1,469 @@
+---
+title: "Assignment 3: Business Report"
+author: "Alima Dzhanybaeva"
+date: "2023-02-24"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(margins)
+library(caret)
+library(pROC)
+library(kableExtra)
+library(viridis)
+library(dplyr)
+library(Hmisc)
+library(modelsummary)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+data <- read_csv('bisnode_cleaned.csv')
+```
+
+## $\text{\underline{Introduction}}$
+
+This project aims to build models that predict the fast-growing firms. A fast-growing firm is typically defined as a company that experiences a high compound annual growth rate (CAGR) over a certain period of time (2012-2014 in our case). The specific CAGR threshold that defines a fast-growing firm can vary depending on the industry, the size of the company, and other factors. However, in general, a CAGR of 20% or higher is considered a strong indicator of a fast-growing company. Therefore, the threshold of 20% is used in this project to divide companies into two groups: *fast_growth*, and *no_fast_growth*. 
+
+In total 7 models will be used for the prediction: 5 logit models, LASSO, and Random Forest.
+
+## $\text{\underline{Data preparation}}$
+
+The original dataset *"cs_bisnode_panel.csv"* includes 287,829 observations and 48 variables for the period 2005-2016. The file "ch17-firm-exit-data-prep.R" was used for the data preparation with the small changes and additions. 
+
+Only firms with sales between 1000 and 10,000,000 were left in the dataset for this project. Additionally, all observations that did not have the data for Compound Annual Growth Rate and for which the value exceeded 99% percentile (around 200%) were dropped from the dataset. In order to classify firms into two subclasses ('fast-growing' and 'not fast-growing') I created variable *fast_growth* that further the models will try to predict. The firms were classified as 'fast-growing' if their CAGR for 2012-2014 was higher than 20%. The table below shows the number of variables that fell into each category:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+datasummary((`fast growth` = as.factor(fast_growth)) ~ N + Percent(), data = data) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+```
+
+At the end we are left with 10462 observations and 118 variables.
+
+## $\text{\underline{PART I: Probability prediction}}$
+
+To identify fast-growing firms 5 logit models, LASSO, and Random Forest were run in this project. The dataset was divided into training and test sets, moreover, to identify possible overfitting cross-validation was used for training data. 
+
+**$\text{\underline{Logit models}}$**
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Define variable sets
+
+rawvars <-  c("curr_assets", "curr_liab", "extra_exp", "extra_inc", "extra_profit_loss", "fixed_assets",
+              "inc_bef_tax", "intang_assets", "inventories", "liq_assets", "material_exp", "personnel_exp",
+              "profit_loss_year", "sales", "share_eq", "subscribed_cap")
+
+qualityvars <- c("balsheet_flag", "balsheet_length", "balsheet_notfullyear")
+engvar <- c("total_assets_bs", "fixed_assets_bs", "liq_assets_bs", "curr_assets_bs",
+            "share_eq_bs", "subscribed_cap_bs", "intang_assets_bs", "extra_exp_pl",
+            "extra_inc_pl", "extra_profit_loss_pl", "inc_bef_tax_pl", "inventories_pl",
+            "material_exp_pl", "profit_loss_year_pl", "personnel_exp_pl")
+engvar2 <- c("extra_profit_loss_pl_quad", "inc_bef_tax_pl_quad",
+             "profit_loss_year_pl_quad", "share_eq_bs_quad")
+engvar3 <- c(grep("*flag_low$", names(data), value = TRUE),
+             grep("*flag_high$", names(data), value = TRUE),
+             grep("*flag_error$", names(data), value = TRUE),
+             grep("*flag_zero$", names(data), value = TRUE))
+d1 <-  c("d1_sales_mil_log_mod", "d1_sales_mil_log_mod_sq",
+         "flag_low_d1_sales_mil_log", "flag_high_d1_sales_mil_log")
+hr <- c("female", "ceo_age", "flag_high_ceo_age", "flag_low_ceo_age",
+        "flag_miss_ceo_age", "ceo_count", "labor_avg_mod",
+        "flag_miss_labor_avg", "foreign_management")
+firm <- c("age", "age2", "new", "ind2_cat", "m_region_loc", "urban_m")
+
+# interactions for logit, LASSO
+interactions1 <- c("ind2_cat*age", "ind2_cat*age2",
+                   "ind2_cat*d1_sales_mil_log_mod", "ind2_cat*sales_mil_log",
+                   "ind2_cat*ceo_age", "ind2_cat*foreign_management",
+                   "ind2_cat*female",   "ind2_cat*urban_m", "ind2_cat*labor_avg_mod")
+interactions2 <- c("sales_mil_log*age", "sales_mil_log*female",
+                   "sales_mil_log*profit_loss_year_pl", "sales_mil_log*foreign_management")
+
+X1 <- c("sales_mil_log", "sales_mil_log_sq", "d1_sales_mil_log_mod", "profit_loss_year_pl", "ind2_cat")
+X2 <- c("sales_mil_log", "sales_mil_log_sq", "d1_sales_mil_log_mod", "profit_loss_year_pl", "fixed_assets_bs","share_eq_bs","curr_liab_bs ",   "curr_liab_bs_flag_high ", "curr_liab_bs_flag_error",  "age","foreign_management" , "ind2_cat")
+X3 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar,                   d1)
+X4 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr, qualityvars)
+X5 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr, qualityvars, interactions1, interactions2)
+
+# for LASSO
+logitvars <- c("sales_mil_log", "sales_mil_log_sq", engvar, engvar2, engvar3, d1, hr, firm, qualityvars, interactions1, interactions2)
+
+# for RF 
+rfvars  <-  c("sales_mil", "d1_sales_mil_log", rawvars, hr, firm, qualityvars)
+
+# X1
+ols_modelx1 <- lm(formula(paste0("fast_growth ~", paste0(X1, collapse = " + "))),
+                  data = data)
+summary(ols_modelx1)
+
+glm_modelx1 <- glm(formula(paste0("fast_growth ~", paste0(X1, collapse = " + "))),
+                   data = data, family = "binomial")
+summary(glm_modelx1)
+
+# X2
+glm_modelx2 <- glm(formula(paste0("fast_growth ~", paste0(X2, collapse = " + "))),
+                   data = data, family = "binomial")
+summary(glm_modelx2)
+
+# marginal effects for logit
+mx2 <- margins(glm_modelx2)
+sum_table <- summary(glm_modelx2) %>%
+  coef() %>%
+  as.data.frame() %>%
+  select(Estimate) %>%
+  mutate(factor = row.names(.)) %>%
+  merge(summary(mx2)[,c("factor","AME")])
+
+# baseline model is X4 (all vars, but no interactions) 
+ols_model <- lm(formula(paste0("fast_growth ~", paste0(X4, collapse = " + "))),
+                data = data)
+summary(ols_model)
+glm_model <- glm(formula(paste0("fast_growth ~", paste0(X4, collapse = " + "))),
+                 data = data, family = "binomial")
+summary(glm_model)
+
+# marginal effects for logit
+m <- margins(glm_model, vce = "none")
+sum_table2 <- summary(glm_model) %>%
+  coef() %>%
+  as.data.frame() %>%
+  select(Estimate, `Std. Error`) %>%
+  mutate(factor = row.names(.)) %>%
+  merge(summary(m)[,c("factor","AME")])
+```
+
+Overall, five logit models were constructed for the prediction, the complexity increased from 1 to 5. Model 1 being the simplest one included only 5 predictors and Model 5 being the most complex contained 84 predictors. 
+
+To evaluate the performance of each model the Root mean squared error (RMSE) and Area Under the Curve (AUC) were used. The table below displays the results for 5 logit models with corresponding values of RMSE and AUC. 
+
+```{r include=FALSE}
+set.seed(12345)
+train_indices <- as.integer(createDataPartition(data$fast_growth, p = 0.8, list = FALSE))
+data_train <- data[train_indices, ]
+data_holdout <- data[-train_indices, ]
+
+twoClassSummaryExtended <- function (data, lev = NULL, model = NULL)
+{
+  lvls <- levels(data$obs)
+  rmse <- sqrt(mean((data[, lvls[1]] - ifelse(data$obs == lev[2], 0, 1))^2))
+  c(defaultSummary(data, lev, model), "RMSE" = rmse)
+}
+
+train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummaryExtended,
+  savePredictions = TRUE
+)
+
+logit_model_vars <- list("X1" = X1, "X2" = X2, "X3" = X3, "X4" = X4, "X5" = X5)
+CV_RMSE_folds <- list()
+logit_models <- list()
+for (model_name in names(logit_model_vars)) {
+  
+  features <- logit_model_vars[[model_name]]
+  
+  set.seed(12345)
+  glm_model <- train(
+    formula(paste0("fast_growth_f ~", paste0(features, collapse = " + "))),
+    method = "glm",
+    data = data_train,
+    family = binomial,
+    trControl = train_control
+  )
+  
+  logit_models[[model_name]] <- glm_model
+  
+  CV_RMSE_folds[[model_name]] <- glm_model$resample[,c("Resample", "RMSE")]
+  
+}
+
+# Logit lasso 
+lambda <- 10^seq(-1, -4, length = 10)
+grid <- expand.grid("alpha" = 1, lambda = lambda)
+set.seed(12345)
+system.time({
+  logit_lasso_model <- train(
+    formula(paste0("fast_growth_f ~", paste0(logitvars, collapse = " + "))),
+    data = data_train,
+    method = "glmnet",
+    preProcess = c("center", "scale"),
+    family = "binomial",
+    trControl = train_control,
+    tuneGrid = grid,
+    na.action=na.exclude
+  )
+})
+tuned_logit_lasso_model <- logit_lasso_model$finalModel
+best_lambda <- logit_lasso_model$bestTune$lambda
+logit_models[["LASSO"]] <- logit_lasso_model
+lasso_coeffs <- as.matrix(coef(tuned_logit_lasso_model, best_lambda))
+CV_RMSE_folds[["LASSO"]] <- logit_lasso_model$resample[,c("Resample", "RMSE")]
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+CV_AUC_folds <- list()
+for (model_name in names(logit_models)) {
+  
+  auc <- list()
+  model <- logit_models[[model_name]]
+  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    cv_fold <-
+      model$pred %>%
+      filter(Resample == fold)
+    
+    roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+    auc[[fold]] <- as.numeric(roc_obj$auc)
+  }
+  
+  CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
+                                           "AUC" = unlist(auc))
+}
+
+CV_RMSE <- list()
+CV_AUC <- list()
+for (model_name in names(logit_models)) {
+  CV_RMSE[[model_name]] <- mean(CV_RMSE_folds[[model_name]]$RMSE)
+  CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
+}
+
+nvars <- lapply(logit_models, FUN = function(x) length(x$coefnames))
+nvars[["LASSO"]] <- sum(lasso_coeffs != 0)
+logit_summary1 <- data.frame("Number of predictors" = unlist(nvars),
+                             "CV RMSE" = unlist(CV_RMSE),
+                             "CV AUC" = unlist(CV_AUC))
+
+logit_summary1 %>% 
+  slice(1:5) %>% 
+  kbl() %>% 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+As we can see from the table, **Model 5** has the lowest RMSE and the highest AUC, indicating that it is performing the best among other logit models in both accuracy and precision measures.
+
+\vspace{1cm}
+
+**$\text{\underline{LASSO}}$**
+
+The table below shows the results for the most complex **Model 5** which includes 84 predictors and **LASSO** which includes only 24 predictors.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+logit_summary1 %>% 
+  slice(c(5,6)) %>% 
+  kbl() %>% 
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+The prefernce was given to **Model 5**, as its RMSE is not much higher higher than the value for LASSO, however, the difference in AUC is substantially bigger. Additionally, *fast_growth* is quite imbalanced, as we have much more observations in the 'fast-growing' group, therefore, AUC may be more important than RMSE, as AUC measures how well the model is able to distinguish between classes.
+
+\vspace{1cm} 
+
+**$\text{\underline{Random Forest}}$**
+
+The results for **Model 5** and **Random Forest** are presented in the table below.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+train_control <- trainControl(
+  method = "cv",
+  n = 5,
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummaryExtended,
+  savePredictions = TRUE
+)
+train_control$verboseIter <- TRUE
+tune_grid <- expand.grid(
+  .mtry = c(5, 6, 7),
+  .splitrule = "gini",
+  .min.node.size = c(10, 15)
+)
+
+set.seed(12345)
+rf_model_p <- train(
+  formula(paste0("fast_growth_f ~ ", paste0(rfvars , collapse = " + "))),
+  method = "ranger",
+  data = data_train,
+  tuneGrid = tune_grid,
+  trControl = train_control,
+)
+best_mtry <- rf_model_p$bestTune$mtry
+best_min_node_size <- rf_model_p$bestTune$min.node.size
+
+CV_RMSE_folds[["rf_p"]] <- rf_model_p$resample[,c("Resample", "RMSE")]
+auc <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <-
+    rf_model_p$pred %>%
+    filter(Resample == fold)
+  
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  auc[[fold]] <- as.numeric(roc_obj$auc)
+}
+CV_AUC_folds[["rf_p"]] <- data.frame("Resample" = names(auc),
+                                     "AUC" = unlist(auc))
+CV_RMSE[["Random_forest"]] <- mean(CV_RMSE_folds[["rf_p"]]$RMSE)
+CV_AUC[["Random_forest"]] <- mean(CV_AUC_folds[["rf_p"]]$AUC)
+rf_summary <- data.frame("CV RMSE" = unlist(CV_RMSE),
+                         "CV AUC" = unlist(CV_AUC))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+rf_summary %>% 
+  slice(c(5,7)) %>% 
+  kbl() %>% 
+  kable_classic(full_width = T)
+```
+
+As we can see from the table, in comparison with **Model 5**, **Random Forest** showed better results for both RMSE and AUC. Consequently, among all 5 logit models and LASSO **Random Forest** has the best predictive performance.
+
+## $\text{\underline{PART II: Classification}}$
+
+**$\text{\underline{Loss Function}}$**
+
+False positive: let's say that we classified firm as a 'fast-growing' one, however, turned out that it is not. If we invest in this company, we can still earn from it, as its cagr may be under the threshold of 20% but still can be positive.
+
+False negative: however, if we classify 'fast-growing' firm into the opposite group we don't invest at all and therefore earn nothing.
+
+Consequently, the assignment assumes that false negative costs us more than false positive, thus we assign FP=1, and FN=2.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+FP=1
+FN=2
+cost = FN/FP
+
+prevelance = sum(data_train$fast_growth)/length(data_train$fast_growth)
+best_tresholds <- list()
+expected_loss <- list()
+logit_cv_rocs <- list()
+logit_cv_threshold <- list()
+logit_cv_expected_loss <- list()
+for (model_name in names(logit_models)) {
+  
+  model <- logit_models[[model_name]]
+  colname <- paste0(model_name,"_prediction")
+  
+  best_tresholds_cv <- list()
+  expected_loss_cv <- list()
+  
+  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    cv_fold <-
+      model$pred %>%
+      filter(Resample == fold)
+    
+    roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+    best_treshold <- coords(roc_obj, "best", ret="all", transpose = FALSE,
+                            best.method="youden", best.weights=c(cost, prevelance))
+    best_tresholds_cv[[fold]] <- best_treshold$threshold
+    expected_loss_cv[[fold]] <- (best_treshold$fp*FP + best_treshold$fn*FN)/length(cv_fold$fast_growth)
+  }
+  
+  best_tresholds[[model_name]] <- mean(unlist(best_tresholds_cv))
+  expected_loss[[model_name]] <- mean(unlist(expected_loss_cv))
+  
+  logit_cv_rocs[[model_name]] <- roc_obj
+  logit_cv_threshold[[model_name]] <- best_treshold
+  logit_cv_expected_loss[[model_name]] <- expected_loss_cv[[fold]]
+  
+}
+logit_summary2 <- data.frame("Avg of optimal thresholds" = unlist(best_tresholds),
+                             "Threshold for Fold5" = sapply(logit_cv_threshold, function(x) {x$threshold}),
+                             "Avg expected loss" = unlist(expected_loss),
+                             "Expected loss for Fold5" = unlist(logit_cv_expected_loss))
+
+# Random Forest
+best_tresholds_cv <- list()
+expected_loss_cv <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <-
+    rf_model_p$pred %>%
+    filter(mtry == best_mtry,
+           min.node.size == best_min_node_size,
+           Resample == fold)
+  
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  best_treshold <- coords(roc_obj, "best", ret="all", transpose = FALSE,
+                          best.method="youden", best.weights=c(cost, prevelance))
+  best_tresholds_cv[[fold]] <- best_treshold$threshold
+  expected_loss_cv[[fold]] <- (best_treshold$fp*FP + best_treshold$fn*FN)/length(cv_fold$fast_growth)
+}
+
+best_tresholds[["rf_p"]] <- mean(unlist(best_tresholds_cv))
+expected_loss[["rf_p"]] <- mean(unlist(expected_loss_cv))
+
+
+nvars[["rf_p"]] <- length(rfvars)
+summary_results <- data.frame("Number of predictors" = unlist(nvars),
+                              "CV RMSE" = unlist(CV_RMSE),
+                              "CV AUC" = unlist(CV_AUC),
+                              "CV threshold" = unlist(best_tresholds),
+                              "CV expected Loss" = unlist(expected_loss))
+model_names <- c("Logit 5",
+                 "Logit LASSO","RF probability")
+summary_results <- summary_results %>%
+  filter(rownames(.) %in% c("X5", "LASSO", "rf_p"))
+rownames(summary_results) <- model_names
+```
+
+The table below displays the the optimal classification thresholds, expected losses with previously defined loss function (FP=1, and FN=2) for the most complex logit model, LASSO, and Random Forest. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary_results %>% 
+  kbl %>% 
+  kable_classic(full_width = T)
+```
+
+Not only **Random Forest** has the lowest RMSE, the highest AUC among other models, but also the lowest predicted loss (1.08). Second lowest loss is observed for the logit **Model5** (1.11), and the highest value is for **LASSO** (1.24). The optimal threshold is around 0.16 for all models.
+
+## $\text{\underline{PART III: Discussion of results}}$
+
+**$\text{\underline{Confusion Table}}$**
+
+The confusion table below was constructed for the model that performed the best, i.e. **Random Forest**, using the best threshold.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+rf_predicted_probabilities_holdout <- predict(rf_model_p, newdata = data_holdout, type = "prob")
+data_holdout$rf_p_prediction <- rf_predicted_probabilities_holdout[,"fast_growth"]
+RMSE(data_holdout$rf_p_prediction, data_holdout$fast_growth)
+
+# ROC curve on holdout
+roc_obj_holdout <- roc(data_holdout$fast_growth, data_holdout[, "rf_p_prediction", drop=TRUE])
+
+# AUC
+as.numeric(roc_obj_holdout$auc)
+
+# Get expected loss on holdout with optimal threshold
+holdout_treshold <- coords(roc_obj_holdout, x = best_tresholds[["rf_p"]] , input= "threshold",
+                           ret="all", transpose = FALSE)
+expected_loss_holdout <- (holdout_treshold$fp*FP + holdout_treshold$fn*FN)/length(data_holdout$fast_growth)
+expected_loss_holdout
+
+# Confusion table on holdout set 
+holdout_prediction <-
+  ifelse(data_holdout$rf_p_prediction < best_tresholds[["rf_p"]] , "no_fast_growth", "fast_growth") %>%
+  factor(levels = c("no_fast_growth", "fast_growth"))
+cm_object_rf<- confusionMatrix(holdout_prediction, as.factor(data_holdout$fast_growth_f))
+cm_rf <- cm_object_rf$table
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+cm_rf %>% 
+  kbl() %>% 
+  kable_classic(full_width = T)
+```
+
+$$accuracy = \frac{TP + TN}{N} = \frac{411+514} {2092} = 44\%$$
+$$sensitivity = \frac{TP}{TP + FN} = \frac{411} {411 + 65} = 86\%$$
+$$specifcity = \frac{TN}{TN + FP} = \frac{514} {1102 + 514} = 31\%$$
+
+Accuracy is equal to 44%, meaning that the model classified firms correctly only 44% of the time. The remaining 54% of predictions were incorrect. 
+
+The sensitivity is quite high (86%) indicating that the model is able to correctly identify a high proportion of positive cases, however, it came at the cost of a lower specificity (31%), which means there will be a lot of false positives.
+
+## $\text{\underline{Conclusion}}$
+
+The best model for predicting probabilities and classifying firms into 'fast_growth' and 'no_fast_growth' was found to be **Random Forest**. Among all 7 models (5 logit models, LASSO, Random Forest), it had the second lowest RMSE (0.417), the highest AUC (0.649), and the lowest predicted loss (1.08). The confusion matrix with the optimal threshold showed quite low values for accuracy and specificity (44% and 31% respectively), nonetheless, the sensitivity is high (86%). This is still better than the situation in which the specificity is significantly higher than the sensitivity, as the higher occurrence of false negatives would be much worse in our case.
